@@ -18,7 +18,7 @@ class Jenkins
    * with each request
    *
    * Defaults to false for backwards compatibility
-   * 
+   *
    * @var boolean
    */
   private $crumbsEnabled = false;
@@ -27,7 +27,7 @@ class Jenkins
    * The anti-CSRF crumb to use for each request
    *
    * Set when crumbs are enabled, by requesting a new crumb from Jenkins
-   * 
+   *
    * @var string
    */
   private $crumb;
@@ -36,7 +36,7 @@ class Jenkins
    * The header to use for sending anti-CSRF crumbs
    *
    * Set when crumbs are enabled, by requesting a new crumb from Jenkins
-   * 
+   *
    * @var string
    */
   private $crumbRequestField;
@@ -71,7 +71,7 @@ class Jenkins
 
   /**
    * Disable the use of anti-CSRF crumbs on requests
-   * 
+   *
    * @return void
    */
   public function disableCrumbs() {
@@ -80,7 +80,7 @@ class Jenkins
 
   /**
    * Get the status of anti-CSRF crumbs
-   * 
+   *
    * @return boolean Whether or not crumbs have been enabled
    */
   public function areCrumbsEnabled() {
@@ -246,8 +246,11 @@ class Jenkins
    * @return bool
    * @throws RuntimeException
    */
-  public function launchJob($jobName, $parameters = array())
+  public function launchJob($jobName, $parameters = array(), $buildToken = '')
   {
+    // Jenkins job names can have spaces in them
+    $jobName = rawurlencode($jobName);
+
     if (0 === count($parameters))
     {
       $url = sprintf('%s/job/%s/build', $this->baseUrl, $jobName);
@@ -257,10 +260,19 @@ class Jenkins
       $url = sprintf('%s/job/%s/buildWithParameters', $this->baseUrl, $jobName);
     }
 
+    if (!empty($buildToken))
+    {
+      $url = $url . "?token=" . $buildToken;
+    }
+
     $curl = curl_init($url);
 
     curl_setopt($curl, CURLOPT_POST, 1);
     curl_setopt($curl, CURLOPT_POSTFIELDS, http_build_query($parameters));
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($curl, CURLOPT_VERBOSE, 1);
+    curl_setopt($curl, CURLOPT_HEADER, 1);
+
 
     $headers = array();
 
@@ -268,16 +280,33 @@ class Jenkins
       $headers[] = $this->getCrumbHeader();
     }
 
-    curl_setopt( $curl, CURLOPT_HTTPHEADER, $headers );
+    curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
 
-    curl_exec($curl);
+    $response = curl_exec($curl);
 
     if (curl_errno($curl))
     {
       throw new RuntimeException(sprintf('Error trying to launch job "%s" (%s)', $parameters['name'], $url));
     }
 
-    return true;
+    curl_close($curl);
+
+    // Find the location header to grab the queue item
+    $response_headers = explode("\n", $response);
+
+    $queue = array();
+
+    foreach ($response_headers as $resp_head) {
+      $resp_head = strtolower($resp_head);
+      if (strpos($resp_head, 'location:') !== FALSE) {
+        $location = trim(str_replace('location:' ,'' , $resp_head));
+        $queueId = end(array_filter(explode("/", $location)));
+        $queue = $this->getQueueItem($queueId);
+        break;
+      }
+    }
+
+    return $queue;
   }
 
   /**
@@ -341,12 +370,16 @@ class Jenkins
   }
 
   /**
+   * @param string queueId
+   *
    * @return Jenkins_Queue
    * @throws RuntimeException
    */
   public function getQueue()
   {
+
     $url = sprintf('%s/queue/api/json', $this->baseUrl);
+
     $curl = curl_init($url);
 
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
@@ -357,12 +390,42 @@ class Jenkins
       throw new RuntimeException(sprintf('Error during getting information for queue on %s', $this->baseUrl));
     }
     $infos = json_decode($ret);
+
     if (!$infos instanceof stdClass)
     {
       throw new RuntimeException('Error during json_decode');
     }
 
     return new Jenkins_Queue($infos, $this);
+  }
+
+ /**
+   * @param string queueId
+   *
+   * @return Jenkins_QueueItem
+   * @throws RuntimeException
+   */
+  public function getQueueItem($queueId)
+  {
+    $url = sprintf('%s/queue/item/%s/api/json', $this->baseUrl, $queueId);
+
+    $curl = curl_init($url);
+
+    curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+    $ret = curl_exec($curl);
+
+    if (curl_errno($curl))
+    {
+      throw new RuntimeException(sprintf('Error during getting information for queue on %s', $this->baseUrl));
+    }
+    $infos = json_decode($ret);
+
+    if (!$infos instanceof stdClass)
+    {
+      throw new RuntimeException('Error during json_decode');
+    }
+
+    return new Jenkins_QueueItem($infos, $this);
   }
 
   /**
@@ -435,6 +498,8 @@ class Jenkins
    */
   public function getBuild($job, $buildId, $tree = 'actions[parameters,parameters[name,value]],result,duration,timestamp,number,url,estimatedDuration,builtOn')
   {
+    $job = rawurlencode($job);
+
     if ($tree !== null)
     {
       $tree = sprintf('?tree=%s', $tree);
@@ -443,6 +508,7 @@ class Jenkins
     $curl = curl_init($url);
 
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+
     $ret = curl_exec($curl);
 
     if (curl_errno($curl))
@@ -727,7 +793,7 @@ class Jenkins
     curl_setopt($curl, CURLOPT_POST, 1);
 
     $headers = array();
-    
+
     if ( $this->areCrumbsEnabled() ) {
       $headers[] = $this->getCrumbHeader();
     }
@@ -749,9 +815,12 @@ class Jenkins
    */
   public function getConsoleTextBuild($jobname, $buildNumber)
   {
+    $jobname = rawurlencode($jobname);
+
     $url  = sprintf('%s/job/%s/%s/consoleText', $this->baseUrl, $jobname, $buildNumber);
     $curl = curl_init($url);
     curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+
     return curl_exec($curl);
   }
 
@@ -841,5 +910,4 @@ class Jenkins
        CURLOPT_RETURNTRANSFER => 1,
     ));
   }
-
 }
